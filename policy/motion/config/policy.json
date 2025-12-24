@@ -1,0 +1,49 @@
+{
+    "action_scaling": {
+        ".*hip.*": 0.5,
+        ".*knee.*": 0.5,
+        ".*ankle.*": 0.5,
+        "waist_yaw_joint": 0.5,
+        ".*shoulder.*": 0.5,
+        ".*elbow.*": 0.5,
+        ".*wrist.*": 0.5
+    },
+    "in_keys": [
+        "robot",
+        "ref_motion_public",
+        "ref_motion_private",
+        "priv"
+    ],
+    "out_keys": [
+        "robot",
+        "ref_motion_public",
+        "ref_motion_private",
+        "priv",
+        "a_in",
+        "_actor_feature",
+        "loc",
+        "scale",
+        "action",
+        "action_log_prob"
+    ],
+    "in_shapes": [
+        [
+            [
+                1,
+                131
+            ],
+            [
+                1,
+                43
+            ],
+            [
+                1,
+                120
+            ],
+            [
+                1,
+                40
+            ]
+        ]
+    ]
+}
