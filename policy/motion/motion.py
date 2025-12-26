@@ -168,18 +168,15 @@ class Motion(FSMState):
         self.action = outputs_result[self.out_keys.index("action")].squeeze(0)
         self.prev_actions = self.action.copy()
         
-        target_dof_pos_lab = self.default_joint_pos_lab
-        target_dof_pos_lab[self.joint_ids] += self.action * self.action_scaling
+        ref_q_lab = self.ref_q_lab[frame_idx]
+        ref_q_mjc = ref_q_lab[self.q_lab2mjc]
 
-        target_dof_pos_mj = np.zeros(self.num_actions, dtype=np.float32)
-        target_dof_pos_mj[self.q_mjc2lab] = target_dof_pos_lab
-
-        self.policy_output.actions = target_dof_pos_mj
+        self.policy_output.actions = ref_q_mjc
         self.policy_output.kps[:] = self.kp_lab[self.q_lab2mjc]
         self.policy_output.kds[:] = self.kd_lab[self.q_lab2mjc]
 
         # Set root state
-        self.policy_output.set_root_state = False
+        self.policy_output.set_root_state = True
         self.policy_output.target_root_pos = self.ref_kp_pos_lab[frame_idx][0]
         self.policy_output.target_root_quat = self.ref_kp_ori_lab[frame_idx][0]
         self.policy_output.target_root_lin_vel = self.ref_kp_lin_vel_lab[frame_idx][0]
