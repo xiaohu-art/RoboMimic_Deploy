@@ -94,6 +94,41 @@ class Motion(FSMState):
         self.motion_time = 0
         self.counter_step = 0
 
+        # Adjust reference motion based on current robot root state
+        root_pos_w = self.state_cmd.base_pos.copy()
+        root_quat_w = self.state_cmd.base_quat.copy()
+        
+        # 1. Calculate Yaw offset
+        robot_yaw_q = yaw_quat(root_quat_w)
+        ref_start_yaw_q = yaw_quat(self.ref_root_quat[0])
+        delta_yaw_q = quat_mul(robot_yaw_q, quat_inv(ref_start_yaw_q))
+
+        # 2. Transform all reference data
+        # Position transformation: P_new = P_robot_start + R_delta_yaw * (P_ref - P_ref_start)
+        ref_start_pos = self.ref_kp_pos_lab[0, 0].copy()
+        
+        # We transform all bodies at once
+        # (T, num_bodies, 3)
+        rel_pos = self.ref_kp_pos_lab - ref_start_pos
+        self.ref_kp_pos_lab = root_pos_w + quat_apply(delta_yaw_q, rel_pos)
+        
+        # Orientation transformation: Q_new = delta_yaw * Q_ref
+        # (T, num_bodies, 4)
+        T, N, _ = self.ref_kp_ori_lab.shape
+        self.ref_kp_ori_lab = quat_mul(
+            np.tile(delta_yaw_q, (T, N, 1)), 
+            self.ref_kp_ori_lab
+        )
+        
+        # Velocity transformation: V_new = delta_yaw * V_ref
+        # (T, num_bodies, 3)
+        self.ref_kp_lin_vel_lab = quat_apply(delta_yaw_q, self.ref_kp_lin_vel_lab)
+        self.ref_kp_ang_vel_lab = quat_apply(delta_yaw_q, self.ref_kp_ang_vel_lab)
+
+        # Update root state helpers
+        self.ref_root_pos = self.ref_kp_pos_lab[:, 0]    # (T, 3)
+        self.ref_root_quat = self.ref_kp_ori_lab[:, 0]    # (T, 4)
+
         observation = {}
         for in_key, in_shape in zip(self.in_keys, self.in_shapes):
             observation[in_key] = np.zeros(in_shape, dtype=np.float32)

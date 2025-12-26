@@ -2,6 +2,11 @@ import re
 import numpy as np
 from typing import Any, Sequence
 
+def yaw_quat(q):
+    w, x, y, z = q
+    yaw = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y**2 + z**2))
+    return np.array([np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)])
+
 def quat_rotate_inverse(quat: np.ndarray, vec: np.ndarray):
     """Apply an inverse quaternion rotation to a vector.
 
