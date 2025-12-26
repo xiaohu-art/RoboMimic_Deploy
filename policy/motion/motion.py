@@ -11,8 +11,8 @@ import torch
 import os
 import json
 import joblib
-from common.utils import get_gravity_orientation
-from policy.motion.utils import quat_rotate_inverse, subtract_frame_transforms
+from policy.motion.utils import *
+from policy.motion.observation import *
 
 class Motion(FSMState):
     def __init__(self, state_cmd:StateAndCmd, policy_output:PolicyOutput):
@@ -22,7 +22,6 @@ class Motion(FSMState):
         self.name = FSMStateName.SKILL_MOTION
         self.name_str = "skill_motion"
         self.counter_step = 0
-        self.ref_motion_phase = 0
 
         current_dir = os.path.dirname(os.path.abspath(__file__))
         self.onnx_path = os.path.join(current_dir, "model", "motion.onnx")
@@ -56,13 +55,24 @@ class Motion(FSMState):
         self.load_motion()
 
         self.ort_session = onnxruntime.InferenceSession(self.onnx_path)
-        observation = {}
-        for in_key, in_shape in zip(self.in_keys, self.in_shapes):
-            observation[in_key] = np.zeros(in_shape, dtype=np.float32)
-        outputs_result = self.ort_session.run(None, observation)
-        
-        self.num_actions = outputs_result[self.out_keys.index("action")].shape[-1]
-        self.prev_actions = np.zeros(self.num_actions, dtype=np.float32)
+
+        self.articulation = Articulation(self.state_cmd, self.q_mjc2lab, self.b_mjc2lab)
+
+        self.robot_obs_list = [
+            root_quat_w(self.articulation),
+            root_angvel_b(self.articulation),
+            projected_gravity_b(self.articulation),
+            joint_pos(self.articulation),
+            joint_vel(self.articulation),
+            body_pos_b(self.articulation, 
+                [   "left_hip_pitch_link", "right_hip_pitch_link", 
+                    "left_knee_link", "right_knee_link", 
+                    "left_ankle_roll_link", "right_ankle_roll_link", 
+                    "left_shoulder_roll_link", "right_shoulder_roll_link", 
+                    "left_elbow_link", "right_elbow_link", 
+                    "left_wrist_yaw_link", "right_wrist_yaw_link"]
+            ),
+        ]
 
     def load_motion(self):
         with open(self.motion_file, "rb") as f:
@@ -81,75 +91,49 @@ class Motion(FSMState):
             self.ref_root_quat = self.ref_kp_ori_lab[:, 0]    # (T, 4)
 
     def enter(self):
-        self.ref_motion_phase = 0.
         self.motion_time = 0
         self.counter_step = 0
 
-        self.action = np.zeros(self.num_actions)
+        observation = {}
+        for in_key, in_shape in zip(self.in_keys, self.in_shapes):
+            observation[in_key] = np.zeros(in_shape, dtype=np.float32)
+        outputs_result = self.ort_session.run(None, observation)
+        self.actions = outputs_result[self.out_keys.index("action")].squeeze(0)
         pass
 
     def get_robot_obs(self):
-        root_pos_w = self.state_cmd.base_pos
-        root_quat_w = self.state_cmd.base_quat
-        root_angvel_b = quat_rotate_inverse(root_quat_w, self.state_cmd.ang_vel)
-        projected_gravity_b = quat_rotate_inverse(root_quat_w, np.array([0., 0., -1.]))
-        joint_pos = self.state_cmd.q[self.q_mjc2lab]
-        joint_vel = self.state_cmd.dq[self.q_mjc2lab]
-        prev_actions = self.prev_actions.copy()
-
-        body_pos = self.state_cmd.body_pos
-        
-        obs_body_names = [
-            "left_hip_pitch_link", "right_hip_pitch_link", 
-            "left_knee_link", "right_knee_link", 
-            "left_ankle_roll_link", "right_ankle_roll_link", 
-            "left_shoulder_roll_link", "right_shoulder_roll_link", 
-            "left_elbow_link", "right_elbow_link", 
-            "left_wrist_yaw_link", "right_wrist_yaw_link"
-        ]
-        obs_body_idx = [body_names_mujoco.index(name) for name in obs_body_names]
-        
-        selected_body_pos = body_pos[obs_body_idx]
-        body_pos_b = quat_rotate_inverse(root_quat_w, selected_body_pos - root_pos_w)
-        
+        obs_data = [o() for o in self.robot_obs_list]
         return np.concatenate([
-            root_quat_w,
-            root_angvel_b,
-            projected_gravity_b,
-            joint_pos,
-            joint_vel,
-            prev_actions,
-            body_pos_b.flatten()
+            *obs_data[:-1],    # root_quat to joint_vel
+            self.actions,
+            obs_data[-1]       # body_pos_b
         ]).astype(np.float32)
 
     def get_ref_motion_public_obs(self):
         frame_idx = self.counter_step % self.ref_q_lab.shape[0]
-        ref_root_quat = self.ref_root_quat[frame_idx]
+        ref_root_quat_w = self.ref_root_quat[frame_idx]
 
-        kp_pos_mjc = self.state_cmd.body_pos
-        kp_ori_mjc = self.state_cmd.body_ori
-        kp_pos_lab = kp_pos_mjc[self.b_mjc2lab]
-        kp_ori_lab = kp_ori_mjc[self.b_mjc2lab]
+        body_indices, body_names = resolve_matching_names(
+            [   "pelvis",
+                "left_hip_pitch_link", "right_hip_pitch_link", 
+                "left_knee_link", "right_knee_link", 
+                "left_ankle_roll_link", "right_ankle_roll_link", 
+                "left_shoulder_roll_link", "right_shoulder_roll_link", 
+                "left_elbow_link", "right_elbow_link", 
+                "left_wrist_yaw_link", "right_wrist_yaw_link"
+            ],
+            body_names_isaac
+        )
 
-        ref_kp_pos_lab = self.ref_kp_pos_lab[frame_idx]
-        ref_kp_ori_lab = self.ref_kp_ori_lab[frame_idx]
+        ref_kp_pos_w = self.ref_kp_pos_lab[frame_idx][body_indices]
+        ref_kp_ori_w = self.ref_kp_ori_lab[frame_idx][body_indices]
 
-        pos, _ = subtract_frame_transforms(kp_pos_lab, kp_ori_lab, ref_kp_pos_lab, ref_kp_ori_lab)
+        body_pos_w = self.articulation.body_pos_w[body_indices]
+        body_quat_w = self.articulation.body_quat_w[body_indices]
 
-        obs_body_names = [
-            "pelvis",
-            "left_hip_pitch_link", "right_hip_pitch_link", 
-            "left_knee_link", "right_knee_link", 
-            "left_ankle_roll_link", "right_ankle_roll_link", 
-            "left_shoulder_roll_link", "right_shoulder_roll_link", 
-            "left_elbow_link", "right_elbow_link", 
-            "left_wrist_yaw_link", "right_wrist_yaw_link"
-        ]
-
-        obs_body_idx = [self.body_names_lab.index(name) for name in obs_body_names]
-        pos = pos[obs_body_idx]
+        pos, _ = subtract_frame_transforms(body_pos_w, body_quat_w, ref_kp_pos_w, ref_kp_ori_w)
         return np.concatenate([
-            ref_root_quat,
+            ref_root_quat_w,
             pos.flatten()
         ]).astype(np.float32)
 
@@ -166,7 +150,6 @@ class Motion(FSMState):
         
         outputs_result = self.ort_session.run(None, observation)
         self.action = outputs_result[self.out_keys.index("action")].squeeze(0)
-        self.prev_actions = self.action.copy()
         
         ref_q_lab = self.ref_q_lab[frame_idx]
         ref_q_mjc = ref_q_lab[self.q_lab2mjc]
@@ -177,8 +160,8 @@ class Motion(FSMState):
 
         # Set root state
         self.policy_output.set_root_state = True
-        self.policy_output.target_root_pos = self.ref_kp_pos_lab[frame_idx][0]
-        self.policy_output.target_root_quat = self.ref_kp_ori_lab[frame_idx][0]
+        self.policy_output.target_root_pos = self.ref_root_pos[frame_idx]
+        self.policy_output.target_root_quat = self.ref_root_quat[frame_idx]
         self.policy_output.target_root_lin_vel = self.ref_kp_lin_vel_lab[frame_idx][0]
         self.policy_output.target_root_ang_vel = self.ref_kp_ang_vel_lab[frame_idx][0]
 
@@ -186,8 +169,6 @@ class Motion(FSMState):
         
     def exit(self):
         self.action = np.zeros(23, dtype=np.float32)
-        self.ref_motion_phase = 0.
-        self.motion_time = 0
         self.counter_step = 0
         print()
         
